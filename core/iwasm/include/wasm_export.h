@@ -941,6 +941,16 @@ wasm_externref_retain(uint32_t externref_idx);
 WASM_RUNTIME_API_EXTERN void
 wasm_runtime_dump_call_stack(wasm_exec_env_t exec_env);
 
+/**
+ * Take snapshot
+ */
+void take_snapshot(char *file);
+
+/**
+ * Stop
+ */
+void stop();
+
 /* clang-format on */
 
 #ifdef __cplusplus

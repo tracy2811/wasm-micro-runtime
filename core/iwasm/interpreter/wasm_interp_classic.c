@@ -9,12 +9,23 @@
 #include "wasm_opcode.h"
 #include "wasm_loader.h"
 #include "../common/wasm_exec_env.h"
+#include "../include/wasm_export.h"
+#include <pthread.h>
 #if WASM_ENABLE_SHARED_MEMORY != 0
 #include "../common/wasm_shared_memory.h"
 #endif
 #if WASM_ENABLE_THREAD_MGR != 0 && WASM_ENABLE_DEBUG_INTERP != 0
 #include "../libraries/thread-mgr/thread_manager.h"
 #endif
+
+enum action { NONE, SNAP, STOP };
+int current_action = NONE;
+
+pthread_mutex_t mutex1 = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mutex2 = PTHREAD_MUTEX_INITIALIZER;
+
+char *filename;
+FILE *ptr;
 
 typedef int32 CellType_I32;
 typedef int64 CellType_I64;
@@ -960,6 +971,73 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
 #endif
 }
 
+// void save(void *data) {
+//     FILE *ptr;
+//     ptr = fopen(filename, "wb");
+//     fwrite(data, sizeof(data), 1, ptr);
+//     fclose(ptr);
+// }
+
+// struct Block {
+//   int nonce;
+//   char hash[64];
+// };
+
+// void
+// read()
+// {
+//     FILE *ptr;
+//     struct Block buffer;
+//     // Read blob
+//     ptr = fopen(file_name,"rb");
+//     while(fread(&buffer,sizeof(buffer),1,ptr) == 1) {
+//         // Print data
+//         printf("%d\n", buffer.nonce);
+//         printf("%.64s\n", buffer.hash);
+//     }
+//     fclose(ptr);
+// }
+
+#define HANDLE_SIGNAL()                                     \
+    switch (current_action)                                 \
+    {                                                       \
+    case STOP:                                              \
+        pthread_mutex_unlock(&mutex2);                      \
+        return;                                             \
+    case SNAP:                                              \
+        ptr = fopen(filename, "wb");                        \
+        fwrite(exec_env, sizeof(exec_env), 1, ptr);         \
+        fclose(ptr);                                        \
+        pthread_mutex_unlock(&mutex2);                      \
+        break;                                              \
+    default:                                                \
+        pthread_mutex_unlock(&mutex2);                      \
+        break;                                              \
+    }                                                       \
+
+#define HANDLE_SIGNAL_END()             \
+    pthread_mutex_lock(&mutex2);        \
+    pthread_mutex_unlock(&mutex1);      \
+
+void take_snapshot(char *file) {
+    pthread_mutex_lock(&mutex1);
+    current_action = SNAP;
+    filename = file;
+    pthread_mutex_unlock(&mutex1);
+    pthread_mutex_lock(&mutex2);
+    pthread_mutex_unlock(&mutex2);
+    return;
+}
+
+void stop() {
+    pthread_mutex_lock(&mutex1);
+    current_action = STOP;
+    pthread_mutex_unlock(&mutex1);
+    pthread_mutex_lock(&mutex2);
+    pthread_mutex_unlock(&mutex2);
+    return;
+}
+
 static void
 wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                                WASMExecEnv *exec_env,
@@ -1017,6 +1095,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
             HANDLE_OP(EXT_OP_BLOCK)
             {
+                HANDLE_SIGNAL();
                 read_leb_uint32(frame_ip, frame_ip_end, type_index);
                 cell_num = wasm_types[type_index]->ret_cell_num;
                 goto handle_op_block;
@@ -1024,6 +1103,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
             HANDLE_OP(WASM_OP_BLOCK)
             {
+                HANDLE_SIGNAL();
                 value_type = *frame_ip++;
                 cell_num = wasm_value_type_cell_num(value_type);
             handle_op_block:
@@ -1049,11 +1129,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     end_addr = NULL;
                 }
                 PUSH_CSP(LABEL_TYPE_BLOCK, cell_num, end_addr);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(EXT_OP_LOOP)
             {
+                HANDLE_SIGNAL();
                 read_leb_uint32(frame_ip, frame_ip_end, type_index);
                 cell_num = wasm_types[type_index]->param_cell_num;
                 goto handle_op_loop;
@@ -1061,15 +1143,18 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
             HANDLE_OP(WASM_OP_LOOP)
             {
+                HANDLE_SIGNAL();
                 value_type = *frame_ip++;
                 cell_num = wasm_value_type_cell_num(value_type);
             handle_op_loop:
                 PUSH_CSP(LABEL_TYPE_LOOP, cell_num, frame_ip);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(EXT_OP_IF)
             {
+                HANDLE_SIGNAL();
                 read_leb_uint32(frame_ip, frame_ip_end, type_index);
                 cell_num = wasm_types[type_index]->ret_cell_num;
                 goto handle_op_if;
@@ -1077,6 +1162,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
             HANDLE_OP(WASM_OP_IF)
             {
+                HANDLE_SIGNAL();
                 value_type = *frame_ip++;
                 cell_num = wasm_value_type_cell_num(value_type);
             handle_op_if:
@@ -1115,18 +1201,22 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         frame_ip = else_addr + 1;
                     }
                 }
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_ELSE)
             {
+                HANDLE_SIGNAL();
                 /* comes from the if branch in WASM_OP_IF */
                 frame_ip = (frame_csp - 1)->target_addr;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_END)
             {
+                HANDLE_SIGNAL();
                 if (frame_csp > frame->csp_bottom + 1) {
                     POP_CSP();
                 }
@@ -1137,11 +1227,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     }
                     goto return_func;
                 }
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_BR)
             {
+                HANDLE_SIGNAL();
 #if WASM_ENABLE_THREAD_MGR != 0
                 CHECK_SUSPEND_FLAGS();
 #endif
@@ -1158,11 +1250,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     }
                     frame_ip = end_addr;
                 }
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_BR_IF)
             {
+                HANDLE_SIGNAL();
 #if WASM_ENABLE_THREAD_MGR != 0
                 CHECK_SUSPEND_FLAGS();
 #endif
@@ -1170,11 +1264,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 cond = (uint32)POP_I32();
                 if (cond)
                     goto label_pop_csp_n;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_BR_TABLE)
             {
+                HANDLE_SIGNAL();
 #if WASM_ENABLE_THREAD_MGR != 0
                 CHECK_SUSPEND_FLAGS();
 #endif
@@ -1190,6 +1286,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
             HANDLE_OP(WASM_OP_RETURN)
             {
+                HANDLE_SIGNAL();
                 frame_sp -= cur_func->ret_cell_num;
                 for (i = 0; i < cur_func->ret_cell_num; i++) {
                     *prev_frame->sp++ = frame_sp[i];
@@ -1199,6 +1296,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
             HANDLE_OP(WASM_OP_CALL)
             {
+                HANDLE_SIGNAL();
 #if WASM_ENABLE_THREAD_MGR != 0
                 CHECK_SUSPEND_FLAGS();
 #endif
@@ -1238,6 +1336,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_RETURN_CALL_INDIRECT)
 #endif
             {
+                HANDLE_SIGNAL();
                 WASMType *cur_type, *cur_func_type;
                 WASMTableInstance *tbl_inst;
                 uint32 tbl_idx;
@@ -1306,33 +1405,41 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             /* parametric instructions */
             HANDLE_OP(WASM_OP_DROP)
             {
+                HANDLE_SIGNAL();
                 frame_sp--;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_DROP_64)
             {
+                HANDLE_SIGNAL();
                 frame_sp -= 2;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_SELECT)
             {
+                HANDLE_SIGNAL();
                 cond = (uint32)POP_I32();
                 frame_sp--;
                 if (!cond)
                     *(frame_sp - 1) = *frame_sp;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_SELECT_64)
             {
+                HANDLE_SIGNAL();
                 cond = (uint32)POP_I32();
                 frame_sp -= 2;
                 if (!cond) {
                     *(frame_sp - 2) = *frame_sp;
                     *(frame_sp - 1) = *(frame_sp + 1);
                 }
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
@@ -1432,6 +1539,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             /* variable instructions */
             HANDLE_OP(WASM_OP_GET_LOCAL)
             {
+                HANDLE_SIGNAL();
                 GET_LOCAL_INDEX_TYPE_AND_OFFSET();
 
                 switch (local_type) {
@@ -1452,22 +1560,26 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         goto got_exception;
                 }
 
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(EXT_OP_GET_LOCAL_FAST)
             {
+                HANDLE_SIGNAL();
                 local_offset = *frame_ip++;
                 if (local_offset & 0x80)
                     PUSH_I64(
                         GET_I64_FROM_ADDR(frame_lp + (local_offset & 0x7F)));
                 else
                     PUSH_I32(*(int32 *)(frame_lp + local_offset));
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_SET_LOCAL)
             {
+                HANDLE_SIGNAL();
                 GET_LOCAL_INDEX_TYPE_AND_OFFSET();
 
                 switch (local_type) {
@@ -1489,11 +1601,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         goto got_exception;
                 }
 
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(EXT_OP_SET_LOCAL_FAST)
             {
+                HANDLE_SIGNAL();
                 local_offset = *frame_ip++;
                 if (local_offset & 0x80)
                     PUT_I64_TO_ADDR(
@@ -1501,11 +1615,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         POP_I64());
                 else
                     *(int32 *)(frame_lp + local_offset) = POP_I32();
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_TEE_LOCAL)
             {
+                HANDLE_SIGNAL();
                 GET_LOCAL_INDEX_TYPE_AND_OFFSET();
 
                 switch (local_type) {
@@ -1528,11 +1644,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         goto got_exception;
                 }
 
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(EXT_OP_TEE_LOCAL_FAST)
             {
+                HANDLE_SIGNAL();
                 local_offset = *frame_ip++;
                 if (local_offset & 0x80)
                     PUT_I64_TO_ADDR(
@@ -1541,41 +1659,49 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 else
                     *(int32 *)(frame_lp + local_offset) =
                         *(int32 *)(frame_sp - 1);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_GET_GLOBAL)
             {
+                HANDLE_SIGNAL();
                 read_leb_uint32(frame_ip, frame_ip_end, global_idx);
                 bh_assert(global_idx < module->global_count);
                 global = globals + global_idx;
                 global_addr = get_global_addr(global_data, global);
                 PUSH_I32(*(uint32 *)global_addr);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_GET_GLOBAL_64)
             {
+                HANDLE_SIGNAL();
                 read_leb_uint32(frame_ip, frame_ip_end, global_idx);
                 bh_assert(global_idx < module->global_count);
                 global = globals + global_idx;
                 global_addr = get_global_addr(global_data, global);
                 PUSH_I64(GET_I64_FROM_ADDR((uint32 *)global_addr));
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_SET_GLOBAL)
             {
+                HANDLE_SIGNAL();
                 read_leb_uint32(frame_ip, frame_ip_end, global_idx);
                 bh_assert(global_idx < module->global_count);
                 global = globals + global_idx;
                 global_addr = get_global_addr(global_data, global);
                 *(int32 *)global_addr = POP_I32();
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_SET_GLOBAL_AUX_STACK)
             {
+                HANDLE_SIGNAL();
                 uint32 aux_stack_top;
 
                 read_leb_uint32(frame_ip, frame_ip_end, global_idx);
@@ -1602,16 +1728,19 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         module->max_aux_stack_used = aux_stack_used;
                 }
 #endif
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_SET_GLOBAL_64)
             {
+                HANDLE_SIGNAL();
                 read_leb_uint32(frame_ip, frame_ip_end, global_idx);
                 bh_assert(global_idx < module->global_count);
                 global = globals + global_idx;
                 global_addr = get_global_addr(global_data, global);
                 PUT_I64_TO_ADDR((uint32 *)global_addr, POP_I64());
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
@@ -1619,6 +1748,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_I32_LOAD)
             HANDLE_OP(WASM_OP_F32_LOAD)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
 
                 read_leb_uint32(frame_ip, frame_ip_end, flags);
@@ -1627,12 +1757,14 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(4);
                 PUSH_I32(LOAD_I32(maddr));
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_LOAD)
             HANDLE_OP(WASM_OP_F64_LOAD)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
 
                 read_leb_uint32(frame_ip, frame_ip_end, flags);
@@ -1641,11 +1773,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(8);
                 PUSH_I64(LOAD_I64(maddr));
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_LOAD8_S)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
 
                 read_leb_uint32(frame_ip, frame_ip_end, flags);
@@ -1654,11 +1788,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(1);
                 PUSH_I32(sign_ext_8_32(*(int8 *)maddr));
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_LOAD8_U)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
 
                 read_leb_uint32(frame_ip, frame_ip_end, flags);
@@ -1667,11 +1803,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(1);
                 PUSH_I32((uint32)(*(uint8 *)maddr));
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_LOAD16_S)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
 
                 read_leb_uint32(frame_ip, frame_ip_end, flags);
@@ -1680,11 +1818,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(2);
                 PUSH_I32(sign_ext_16_32(LOAD_I16(maddr)));
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_LOAD16_U)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
 
                 read_leb_uint32(frame_ip, frame_ip_end, flags);
@@ -1693,11 +1833,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(2);
                 PUSH_I32((uint32)(LOAD_U16(maddr)));
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_LOAD8_S)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
 
                 read_leb_uint32(frame_ip, frame_ip_end, flags);
@@ -1706,11 +1848,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(1);
                 PUSH_I64(sign_ext_8_64(*(int8 *)maddr));
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_LOAD8_U)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
 
                 read_leb_uint32(frame_ip, frame_ip_end, flags);
@@ -1719,11 +1863,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(1);
                 PUSH_I64((uint64)(*(uint8 *)maddr));
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_LOAD16_S)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
 
                 read_leb_uint32(frame_ip, frame_ip_end, flags);
@@ -1732,11 +1878,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(2);
                 PUSH_I64(sign_ext_16_64(LOAD_I16(maddr)));
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_LOAD16_U)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
 
                 read_leb_uint32(frame_ip, frame_ip_end, flags);
@@ -1745,11 +1893,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(2);
                 PUSH_I64((uint64)(LOAD_U16(maddr)));
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_LOAD32_S)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
 
                 opcode = *(frame_ip - 1);
@@ -1759,11 +1909,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(4);
                 PUSH_I64(sign_ext_32_64(LOAD_I32(maddr)));
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_LOAD32_U)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
 
                 read_leb_uint32(frame_ip, frame_ip_end, flags);
@@ -1772,6 +1924,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(4);
                 PUSH_I64((uint64)(LOAD_U32(maddr)));
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
@@ -1779,6 +1932,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_I32_STORE)
             HANDLE_OP(WASM_OP_F32_STORE)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
 
                 read_leb_uint32(frame_ip, frame_ip_end, flags);
@@ -1788,12 +1942,14 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 CHECK_MEMORY_OVERFLOW(4);
                 STORE_U32(maddr, frame_sp[1]);
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_STORE)
             HANDLE_OP(WASM_OP_F64_STORE)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
 
                 read_leb_uint32(frame_ip, frame_ip_end, flags);
@@ -1804,12 +1960,14 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 STORE_U32(maddr, frame_sp[1]);
                 STORE_U32(maddr + 4, frame_sp[2]);
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_STORE8)
             HANDLE_OP(WASM_OP_I32_STORE16)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
                 uint32 sval;
 
@@ -1829,6 +1987,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 }
 
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
@@ -1836,6 +1995,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             HANDLE_OP(WASM_OP_I64_STORE16)
             HANDLE_OP(WASM_OP_I64_STORE32)
             {
+                HANDLE_SIGNAL();
                 uint32 offset, flags, addr;
                 uint64 sval;
 
@@ -1858,21 +2018,25 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     STORE_U32(maddr, (uint32)sval);
                 }
                 (void)flags;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             /* memory size and memory grow instructions */
             HANDLE_OP(WASM_OP_MEMORY_SIZE)
             {
+                HANDLE_SIGNAL();
                 uint32 reserved;
                 read_leb_uint32(frame_ip, frame_ip_end, reserved);
                 PUSH_I32(memory->cur_page_count);
                 (void)reserved;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_MEMORY_GROW)
             {
+                HANDLE_SIGNAL();
                 uint32 reserved, delta,
                     prev_page_count = memory->cur_page_count;
 
@@ -1893,6 +2057,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                 }
 
                 (void)reserved;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
@@ -1907,6 +2072,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
             HANDLE_OP(WASM_OP_F32_CONST)
             {
+                HANDLE_SIGNAL();
                 uint8 *p_float = (uint8 *)frame_sp++;
                 for (i = 0; i < sizeof(float32); i++)
                     *p_float++ = *frame_ip++;
@@ -1915,260 +2081,343 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
             HANDLE_OP(WASM_OP_F64_CONST)
             {
+                HANDLE_SIGNAL();
                 uint8 *p_float = (uint8 *)frame_sp++;
                 frame_sp++;
                 for (i = 0; i < sizeof(float64); i++)
                     *p_float++ = *frame_ip++;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             /* comparison instructions of i32 */
             HANDLE_OP(WASM_OP_I32_EQZ)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_EQZ(I32);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_EQ)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(uint32, I32, ==);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_NE)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(uint32, I32, !=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_LT_S)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(int32, I32, <);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_LT_U)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(uint32, I32, <);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_GT_S)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(int32, I32, >);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_GT_U)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(uint32, I32, >);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_LE_S)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(int32, I32, <=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_LE_U)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(uint32, I32, <=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_GE_S)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(int32, I32, >=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_GE_U)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(uint32, I32, >=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             /* comparison instructions of i64 */
             HANDLE_OP(WASM_OP_I64_EQZ)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_EQZ(I64);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_EQ)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(uint64, I64, ==);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_NE)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(uint64, I64, !=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_LT_S)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(int64, I64, <);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_LT_U)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(uint64, I64, <);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_GT_S)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(int64, I64, >);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_GT_U)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(uint64, I64, >);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_LE_S)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(int64, I64, <=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_LE_U)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(uint64, I64, <=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_GE_S)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(int64, I64, >=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_GE_U)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(uint64, I64, >=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             /* comparison instructions of f32 */
             HANDLE_OP(WASM_OP_F32_EQ)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(float32, F32, ==);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_NE)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(float32, F32, !=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_LT)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(float32, F32, <);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_GT)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(float32, F32, >);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_LE)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(float32, F32, <=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_GE)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(float32, F32, >=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             /* comparison instructions of f64 */
             HANDLE_OP(WASM_OP_F64_EQ)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(float64, F64, ==);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_NE)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(float64, F64, !=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_LT)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(float64, F64, <);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_GT)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(float64, F64, >);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_LE)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(float64, F64, <=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_GE)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CMP(float64, F64, >=);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             /* numberic instructions of i32 */
             HANDLE_OP(WASM_OP_I32_CLZ)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_BIT_COUNT(uint32, I32, clz32);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_CTZ)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_BIT_COUNT(uint32, I32, ctz32);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_POPCNT)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_BIT_COUNT(uint32, I32, popcount32);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_ADD)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC(uint32, uint32, I32, +);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_SUB)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC(uint32, uint32, I32, -);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_MUL)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC(uint32, uint32, I32, *);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_DIV_S)
             {
+                HANDLE_SIGNAL();
                 int32 a, b;
 
                 b = POP_I32();
@@ -2182,11 +2431,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
                 PUSH_I32(a / b);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_DIV_U)
             {
+                HANDLE_SIGNAL();
                 uint32 a, b;
 
                 b = (uint32)POP_I32();
@@ -2196,11 +2447,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
                 PUSH_I32(a / b);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_REM_S)
             {
+                HANDLE_SIGNAL();
                 int32 a, b;
 
                 b = POP_I32();
@@ -2219,6 +2472,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
             HANDLE_OP(WASM_OP_I32_REM_U)
             {
+                HANDLE_SIGNAL();
                 uint32 a, b;
 
                 b = (uint32)POP_I32();
@@ -2228,104 +2482,134 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
                 PUSH_I32(a % b);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_AND)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC(uint32, uint32, I32, &);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_OR)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC(uint32, uint32, I32, |);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_XOR)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC(uint32, uint32, I32, ^);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_SHL)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC2(uint32, uint32, I32, <<);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_SHR_S)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC2(int32, uint32, I32, >>);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_SHR_U)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC2(uint32, uint32, I32, >>);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_ROTL)
             {
+                HANDLE_SIGNAL();
                 uint32 a, b;
 
                 b = (uint32)POP_I32();
                 a = (uint32)POP_I32();
                 PUSH_I32(rotl32(a, b));
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_ROTR)
             {
+                HANDLE_SIGNAL();
                 uint32 a, b;
 
                 b = (uint32)POP_I32();
                 a = (uint32)POP_I32();
                 PUSH_I32(rotr32(a, b));
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             /* numberic instructions of i64 */
             HANDLE_OP(WASM_OP_I64_CLZ)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_BIT_COUNT(uint64, I64, clz64);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_CTZ)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_BIT_COUNT(uint64, I64, ctz64);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_POPCNT)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_BIT_COUNT(uint64, I64, popcount64);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_ADD)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC_64(uint64, uint64, I64, +);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_SUB)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC_64(uint64, uint64, I64, -);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_MUL)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC_64(uint64, uint64, I64, *);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_DIV_S)
             {
+                HANDLE_SIGNAL();
                 int64 a, b;
 
                 b = POP_I64();
@@ -2339,11 +2623,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
                 PUSH_I64(a / b);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_DIV_U)
             {
+                HANDLE_SIGNAL();
                 uint64 a, b;
 
                 b = (uint64)POP_I64();
@@ -2353,11 +2639,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
                 PUSH_I64(a / b);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_REM_S)
             {
+                HANDLE_SIGNAL();
                 int64 a, b;
 
                 b = POP_I64();
@@ -2371,11 +2659,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
                 PUSH_I64(a % b);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_REM_U)
             {
+                HANDLE_SIGNAL();
                 uint64 a, b;
 
                 b = (uint64)POP_I64();
@@ -2385,139 +2675,179 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     goto got_exception;
                 }
                 PUSH_I64(a % b);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_AND)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC_64(uint64, uint64, I64, &);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_OR)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC_64(uint64, uint64, I64, |);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_XOR)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC_64(uint64, uint64, I64, ^);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_SHL)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC2_64(uint64, uint64, I64, <<);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_SHR_S)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC2_64(int64, uint64, I64, >>);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_SHR_U)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC2_64(uint64, uint64, I64, >>);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_ROTL)
             {
+                HANDLE_SIGNAL();
                 uint64 a, b;
 
                 b = (uint64)POP_I64();
                 a = (uint64)POP_I64();
                 PUSH_I64(rotl64(a, b));
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_ROTR)
             {
+                HANDLE_SIGNAL();
                 uint64 a, b;
 
                 b = (uint64)POP_I64();
                 a = (uint64)POP_I64();
                 PUSH_I64(rotr64(a, b));
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             /* numberic instructions of f32 */
             HANDLE_OP(WASM_OP_F32_ABS)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_MATH(float32, F32, fabs);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_NEG)
             {
+                HANDLE_SIGNAL();
                 uint32 u32 = frame_sp[-1];
                 uint32 sign_bit = u32 & ((uint32)1 << 31);
                 if (sign_bit)
                     frame_sp[-1] = u32 & ~((uint32)1 << 31);
                 else
                     frame_sp[-1] = u32 | ((uint32)1 << 31);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_CEIL)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_MATH(float32, F32, ceil);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_FLOOR)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_MATH(float32, F32, floor);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_TRUNC)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_MATH(float32, F32, trunc);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_NEAREST)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_MATH(float32, F32, rint);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_SQRT)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_MATH(float32, F32, sqrt);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_ADD)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC(float32, float32, F32, +);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_SUB)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC(float32, float32, F32, -);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_MUL)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC(float32, float32, F32, *);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_DIV)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC(float32, float32, F32, /);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_MIN)
             {
+                HANDLE_SIGNAL();
                 float32 a, b;
 
                 b = POP_F32();
@@ -2529,11 +2859,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     PUSH_F32(b);
                 else
                     PUSH_F32(wa_fmin(a, b));
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_MAX)
             {
+                HANDLE_SIGNAL();
                 float32 a, b;
 
                 b = POP_F32();
@@ -2545,93 +2877,118 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     PUSH_F32(b);
                 else
                     PUSH_F32(wa_fmax(a, b));
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_COPYSIGN)
             {
+                HANDLE_SIGNAL();
                 float32 a, b;
 
                 b = POP_F32();
                 a = POP_F32();
                 PUSH_F32(signbit(b) ? -fabs(a) : fabs(a));
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             /* numberic instructions of f64 */
             HANDLE_OP(WASM_OP_F64_ABS)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_MATH(float64, F64, fabs);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_NEG)
             {
+                HANDLE_SIGNAL();
                 uint64 u64 = GET_I64_FROM_ADDR(frame_sp - 2);
                 uint64 sign_bit = u64 & (((uint64)1) << 63);
                 if (sign_bit)
                     PUT_I64_TO_ADDR(frame_sp - 2, (u64 & ~(((uint64)1) << 63)));
                 else
                     PUT_I64_TO_ADDR(frame_sp - 2, (u64 | (((uint64)1) << 63)));
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_CEIL)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_MATH(float64, F64, ceil);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_FLOOR)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_MATH(float64, F64, floor);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_TRUNC)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_MATH(float64, F64, trunc);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_NEAREST)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_MATH(float64, F64, rint);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_SQRT)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_MATH(float64, F64, sqrt);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_ADD)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC_64(float64, float64, F64, +);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_SUB)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC_64(float64, float64, F64, -);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_MUL)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC_64(float64, float64, F64, *);
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_DIV)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_NUMERIC_64(float64, float64, F64, /);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_MIN)
             {
+                HANDLE_SIGNAL();
                 float64 a, b;
 
                 b = POP_F64();
@@ -2643,11 +3000,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     PUSH_F64(b);
                 else
                     PUSH_F64(wa_fmin(a, b));
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_MAX)
             {
+                HANDLE_SIGNAL();
                 float64 a, b;
 
                 b = POP_F64();
@@ -2659,161 +3018,206 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                     PUSH_F64(b);
                 else
                     PUSH_F64(wa_fmax(a, b));
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_COPYSIGN)
             {
+                HANDLE_SIGNAL();
                 float64 a, b;
 
                 b = POP_F64();
                 a = POP_F64();
                 PUSH_F64(signbit(b) ? -fabs(a) : fabs(a));
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             /* conversions of i32 */
             HANDLE_OP(WASM_OP_I32_WRAP_I64)
             {
+                HANDLE_SIGNAL();
                 int32 value = (int32)(POP_I64() & 0xFFFFFFFFLL);
                 PUSH_I32(value);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_TRUNC_S_F32)
             {
+                HANDLE_SIGNAL();
                 /* We don't use INT32_MIN/INT32_MAX/UINT32_MIN/UINT32_MAX,
                    since float/double values of ieee754 cannot precisely
                    represent all int32/uint32/int64/uint64 values, e.g.
                    UINT32_MAX is 4294967295, but (float32)4294967295 is
                    4294967296.0f, but not 4294967295.0f. */
                 DEF_OP_TRUNC_F32(-2147483904.0f, 2147483648.0f, true, true);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_TRUNC_U_F32)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_TRUNC_F32(-1.0f, 4294967296.0f, true, false);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_TRUNC_S_F64)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_TRUNC_F64(-2147483649.0, 2147483648.0, true, true);
                 /* frame_sp can't be moved in trunc function, we need to
                   manually adjust it if src and dst op's cell num is
                   different */
                 frame_sp--;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_TRUNC_U_F64)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_TRUNC_F64(-1.0, 4294967296.0, true, false);
                 frame_sp--;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             /* conversions of i64 */
             HANDLE_OP(WASM_OP_I64_EXTEND_S_I32)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(int64, I64, int32, I32);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_EXTEND_U_I32)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(int64, I64, uint32, I32);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_TRUNC_S_F32)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_TRUNC_F32(-9223373136366403584.0f,
                                  9223372036854775808.0f, false, true);
                 frame_sp++;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_TRUNC_U_F32)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_TRUNC_F32(-1.0f, 18446744073709551616.0f, false, false);
                 frame_sp++;
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_TRUNC_S_F64)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_TRUNC_F64(-9223372036854777856.0, 9223372036854775808.0,
                                  false, true);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_TRUNC_U_F64)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_TRUNC_F64(-1.0, 18446744073709551616.0, false, false);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             /* conversions of f32 */
             HANDLE_OP(WASM_OP_F32_CONVERT_S_I32)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(float32, F32, int32, I32);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_CONVERT_U_I32)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(float32, F32, uint32, I32);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_CONVERT_S_I64)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(float32, F32, int64, I64);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_CONVERT_U_I64)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(float32, F32, uint64, I64);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F32_DEMOTE_F64)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(float32, F32, float64, F64);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             /* conversions of f64 */
             HANDLE_OP(WASM_OP_F64_CONVERT_S_I32)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(float64, F64, int32, I32);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_CONVERT_U_I32)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(float64, F64, uint32, I32);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_CONVERT_S_I64)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(float64, F64, int64, I64);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_CONVERT_U_I64)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(float64, F64, uint64, I64);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_F64_PROMOTE_F32)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(float64, F64, float32, F32);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
@@ -2825,36 +3229,47 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
             HANDLE_OP(WASM_OP_I32_EXTEND8_S)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(int32, I32, int8, I32);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I32_EXTEND16_S)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(int32, I32, int16, I32);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_EXTEND8_S)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(int64, I64, int8, I64);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_EXTEND16_S)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(int64, I64, int16, I64);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_I64_EXTEND32_S)
             {
+                HANDLE_SIGNAL();
                 DEF_OP_CONVERT(int64, I64, int32, I64);
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
             HANDLE_OP(WASM_OP_MISC_PREFIX)
             {
+                HANDLE_SIGNAL();
                 uint32 opcode1;
 
                 read_leb_uint32(frame_ip, frame_ip_end, opcode1);
@@ -3152,6 +3567,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
                         wasm_set_exception(module, "unsupported opcode");
                         goto got_exception;
                 }
+                HANDLE_SIGNAL_END();
                 HANDLE_OP_END();
             }
 
@@ -3488,6 +3904,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
             HANDLE_OP(WASM_OP_IMPDEP)
             {
+                HANDLE_SIGNAL();
                 frame = prev_frame;
                 frame_ip = frame->ip;
                 frame_sp = frame->sp;
@@ -3656,6 +4073,8 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             CHECK_SUSPEND_FLAGS();
 #endif
         }
+        pthread_mutex_lock(&mutex2);
+        pthread_mutex_unlock(&mutex1);
         HANDLE_OP_END();
     }
 
@@ -3669,6 +4088,8 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
             return;
 
         RECOVER_CONTEXT(prev_frame);
+        pthread_mutex_unlock(&mutex2);
+        pthread_mutex_unlock(&mutex1);
         HANDLE_OP_END();
     }
 
@@ -3683,6 +4104,8 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
     got_exception:
         SYNC_ALL_TO_FRAME();
+        pthread_mutex_unlock(&mutex2);
+        pthread_mutex_unlock(&mutex1);
         return;
 
 #if WASM_ENABLE_LABELS_AS_VALUES == 0
