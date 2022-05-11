@@ -951,6 +951,16 @@ void take_snapshot(char *file);
  */
 void stop();
 
+/**
+ * Take snapshot and stop
+ */
+void take_snapshot_and_stop(char *file);
+
+/**
+ * Start from snapshot
+ */
+void start_from_snapshot(char *file);
+
 /* clang-format on */
 
 #ifdef __cplusplus
