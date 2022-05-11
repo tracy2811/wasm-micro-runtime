@@ -1113,6 +1113,7 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
         case SNAP:                                                         \
             current_action = NONE;                                         \
             SAVE_SNAP();                                                   \
+            pthread_mutex_unlock(&mutex2);                                 \
             pthread_mutex_unlock(&mutex1);                                 \
             pthread_mutex_lock(&mutex2);                                   \
             break;                                                         \
