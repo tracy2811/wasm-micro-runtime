@@ -1086,7 +1086,6 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
     fclose(ptr);
 
 #define HANDLE_SIGNAL()                                                    \
-    pthread_mutex_lock(&mutex2);                                           \
     pthread_mutex_lock(&mutex1);                                           \
     if (((exec_env->wasm_stack.s.top) - ((uint8 *)frame_lp) < 0)           \
         || (((uint8 *)frame_lp) - (exec_env->wasm_stack.s.bottom)) < 0) {  \
@@ -1109,18 +1108,20 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
             current_action = NONE;                                         \
             pthread_mutex_unlock(&mutex2);                                 \
             pthread_mutex_unlock(&mutex1);                                 \
+            pthread_mutex_lock(&mutex2);                                   \
             return;                                                        \
         case SNAP:                                                         \
             current_action = NONE;                                         \
             SAVE_SNAP();                                                   \
-            pthread_mutex_unlock(&mutex2);                                 \
             pthread_mutex_unlock(&mutex1);                                 \
+            pthread_mutex_lock(&mutex2);                                   \
             break;                                                         \
         case SNAP_STOP:                                                    \
             current_action = NONE;                                         \
             SAVE_SNAP();                                                   \
             pthread_mutex_unlock(&mutex2);                                 \
             pthread_mutex_unlock(&mutex1);                                 \
+            pthread_mutex_lock(&mutex2);                                   \
             return;                                                        \
         case SNAP_START:                                                   \
             count_to_snap++;                                               \
@@ -1130,10 +1131,12 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
             }                                                              \
             pthread_mutex_unlock(&mutex2);                                 \
             pthread_mutex_unlock(&mutex1);                                 \
+            pthread_mutex_lock(&mutex2);                                   \
             break;                                                         \
         default:                                                           \
             pthread_mutex_unlock(&mutex2);                                 \
             pthread_mutex_unlock(&mutex1);                                 \
+            pthread_mutex_lock(&mutex2);                                   \
             break;                                                         \
     }
 
