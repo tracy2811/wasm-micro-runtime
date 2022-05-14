@@ -140,17 +140,21 @@ int *
 run_phantom(void *ptr)
 {
     printf("Phantom started\n");
-    
-    char *file_name = "snapshot1";
 
-    sleep(3);
+    char *file_name0 = "snapshot0";
+    char *file_name1 = "snapshot1";
+
+    sleep(2);
     if (ptr) {
         printf("Stop...\n");
         stop();
     }
     else {
+        printf("Take snapshot #0...\n");
+        take_snapshot(file_name0);
+        sleep(1);
         printf("Take snapshot #1 then stop...\n");
-        take_snapshot_and_stop(file_name);
+        take_snapshot_and_stop(file_name1);
     }
 
     printf("Phantom finished\n");

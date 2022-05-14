@@ -973,12 +973,12 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
 }
 
 #define READ_SNAP()                                                            \
-    current_action = NONE;                                                     \
     ptr = fopen(filename, "rb");                                               \
     if (!ptr) {                                                                \
         fprintf(stdout, "%s %d\n", filename, errno);                           \
         break;                                                                 \
     }                                                                          \
+    fprintf(stdout, "==============================\n");                       \
     /* Read memory */                                                          \
     fread(&(memory->num_bytes_per_page), sizeof(uint32), 1, ptr);              \
     fread(&(memory->cur_page_count), sizeof(uint32), 1, ptr);                  \
@@ -989,11 +989,9 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
     /* memory->memory_data_end = memory->memory_data + length - 1; */          \
     fread(memory->memory_data, sizeof(uint8), length, ptr);                    \
     /* Read globals */                                                         \
-    /* REad stack */                                                           \
-    fread(&length, sizeof(length), 1, ptr);                                    \
-    fread(exec_env->wasm_stack.s.bottom, sizeof(uint8), length, ptr);          \
-    fprintf(stdout, "Read Stack length: %ld\n", length);                       \
     /* Read frame */                                                           \
+    fread(&depth, sizeof(uint32), 1, ptr);                                     \
+    fprintf(stdout, "Read Depth: %d\n", depth);                                \
     fread(&length, sizeof(length), 1, ptr);                                    \
     frame_ip = length + wasm_get_func_code(cur_func);                          \
     fprintf(stdout, "Read Frame IP pos: %ld\n", length);                       \
@@ -1001,16 +999,14 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
     frame_ip_end = length + frame_ip;                                          \
     fprintf(stdout, "Read Frame IP End pos: %ld\n", length);                   \
     fread(&length, sizeof(length), 1, ptr);                                    \
-    frame_lp = (uint32 *)(length + exec_env->wasm_stack.s.bottom);             \
-    fprintf(stdout, "Read Frame LP pos: %ld\n", length);                       \
-    fread(&length, sizeof(length), 1, ptr);                                    \
-    frame_sp = (uint32 *)(length + exec_env->wasm_stack.s.bottom);             \
-    fprintf(stdout, "Rread Frame SP pos: %ld\n", length);                      \
+    fread(frame->lp, sizeof(uint32), length, ptr);                             \
+    fprintf(stdout, "Read Frame LP+SP Length: %ld\n", length);                 \
     /* Read csp */                                                             \
     fread(&length, sizeof(length), 1, ptr);                                    \
     fprintf(stdout, "Read Frame CSP length: %ld\n", length);                   \
     for (size_t i = 1; i <= length; i++) {                                     \
         size_t val_to_save;                                                    \
+        int64 signed_val_to_save;                                              \
         fprintf(stdout, "Read Frame CSP #%ld: ", i);                           \
         fread(&(frame_csp->cell_num), sizeof(uint32), 1, ptr);                 \
         fprintf(stdout, "cell_num=%d ", frame_csp->cell_num);                  \
@@ -1018,10 +1014,12 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
         frame_csp->begin_addr = val_to_save + wasm_get_func_code(cur_func);    \
         fprintf(stdout, "begin_addr=%ld ",                                     \
                 frame_csp->begin_addr - wasm_get_func_code(cur_func));         \
-        fread(&(val_to_save), sizeof(val_to_save), 1, ptr);                    \
-        frame_csp->target_addr = val_to_save + wasm_get_func_code(cur_func);   \
-        fprintf(stdout, "target_addr=%ld ",                                    \
-                frame_csp->target_addr - wasm_get_func_code(cur_func));        \
+        fread(&(signed_val_to_save), sizeof(signed_val_to_save), 1, ptr);      \
+        frame_csp->target_addr =                                               \
+            signed_val_to_save < 0                                             \
+                ? NULL                                                         \
+                : signed_val_to_save + wasm_get_func_code(cur_func);           \
+        fprintf(stdout, "target_addr=%ld ", signed_val_to_save);               \
         fread(&(val_to_save), sizeof(val_to_save), 1, ptr);                    \
         frame_csp->frame_sp =                                                  \
             (uint32 *)(val_to_save + exec_env->wasm_stack.s.bottom);           \
@@ -1029,10 +1027,12 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
                 (uint8 *)frame_csp->frame_sp - exec_env->wasm_stack.s.bottom); \
         frame_csp++;                                                           \
     }                                                                          \
+    fprintf(stdout, "==============================\n");                       \
     fclose(ptr);
 
 #define SAVE_SNAP()                                                           \
     ptr = fopen(filename, "wb");                                              \
+    fprintf(stdout, "==============================\n");                      \
     /* Write memory */                                                        \
     fwrite(&(memory->num_bytes_per_page), sizeof(uint32), 1, ptr);            \
     fwrite(&(memory->cur_page_count), sizeof(uint32), 1, ptr);                \
@@ -1042,24 +1042,19 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
     fwrite(&length, sizeof(length), 1, ptr);                                  \
     fwrite(memory->memory_data, sizeof(uint8), length, ptr);                  \
     /* Write globals */                                                       \
-    /* Write stack */                                                         \
-    length = exec_env->wasm_stack.s.top - exec_env->wasm_stack.s.bottom + 1;  \
-    fprintf(stdout, "Stack length: %ld\n", length);                           \
-    fwrite(&length, sizeof(length), 1, ptr);                                  \
-    fwrite(exec_env->wasm_stack.s.bottom, sizeof(uint8), length, ptr);        \
     /* Write frame */                                                         \
+    fwrite(&depth, sizeof(uint32), 1, ptr);                                   \
+    fprintf(stdout, "Depth: %d\n", depth);                                    \
     length = frame_ip - wasm_get_func_code(cur_func);                         \
     fwrite(&length, sizeof(length), 1, ptr);                                  \
     fprintf(stdout, "Frame IP pos: %ld\n", length);                           \
     length = frame_ip_end - frame_ip;                                         \
     fwrite(&length, sizeof(length), 1, ptr);                                  \
     fprintf(stdout, "Frame IP End pos: %ld\n", length);                       \
-    length = (uint8 *)frame_lp - exec_env->wasm_stack.s.bottom;               \
+    length = frame_sp - frame->lp + 1;                                        \
     fwrite(&length, sizeof(length), 1, ptr);                                  \
-    fprintf(stdout, "Frame LP pos: %ld\n", length);                           \
-    length = (uint8 *)frame_sp - exec_env->wasm_stack.s.bottom;               \
-    fwrite(&length, sizeof(length), 1, ptr);                                  \
-    fprintf(stdout, "Frame SP pos: %ld\n", length);                           \
+    fwrite(frame->lp, sizeof(uint32), length, ptr);                           \
+    fprintf(stdout, "Frame LP+SP Length: %ld\n", length);                     \
     /* Write frame csp */                                                     \
     length = frame_csp - frame->csp_bottom - 1;                               \
     fprintf(stdout, "Frame CSP length: %ld\n", length);                       \
@@ -1067,6 +1062,7 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
     for (size_t i = 1; i <= length; i++) {                                    \
         WASMBranchBlock *cur_frame_csp = frame->csp_bottom + i;               \
         size_t val_to_save;                                                   \
+        int64 signed_val_to_save;                                             \
         fprintf(stdout, "Frame CSP #%ld: ", i);                               \
         fwrite(&(cur_frame_csp->cell_num), sizeof(uint32), 1, ptr);           \
         fprintf(stdout, "cell_num=%d ", cur_frame_csp->cell_num);             \
@@ -1074,15 +1070,18 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
             cur_frame_csp->begin_addr - wasm_get_func_code(cur_func);         \
         fwrite(&(val_to_save), sizeof(val_to_save), 1, ptr);                  \
         fprintf(stdout, "begin_addr=%ld ", val_to_save);                      \
-        val_to_save =                                                         \
-            cur_frame_csp->target_addr - wasm_get_func_code(cur_func);        \
-        fwrite(&(val_to_save), sizeof(val_to_save), 1, ptr);                  \
-        fprintf(stdout, "target_addr=%ld ", val_to_save);                     \
+        signed_val_to_save =                                                  \
+            cur_frame_csp->target_addr == NULL                                \
+                ? -1                                                          \
+                : cur_frame_csp->target_addr - wasm_get_func_code(cur_func);  \
+        fwrite(&(signed_val_to_save), sizeof(signed_val_to_save), 1, ptr);    \
+        fprintf(stdout, "target_addr=%ld ", signed_val_to_save);              \
         val_to_save =                                                         \
             (uint8 *)cur_frame_csp->frame_sp - exec_env->wasm_stack.s.bottom; \
         fwrite(&(val_to_save), sizeof(val_to_save), 1, ptr);                  \
-        fprintf(stdout, "frame_sp=%ld\n ", val_to_save);                      \
+        fprintf(stdout, "frame_sp=%ld\n", val_to_save);                       \
     }                                                                         \
+    fprintf(stdout, "============================\n");                        \
     fclose(ptr);
 
 #define HANDLE_SIGNAL()                                                    \
