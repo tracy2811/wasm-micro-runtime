@@ -47,7 +47,6 @@ OUT_FILE=${i%.*}.wasm
         --sysroot=${WAMR_DIR}/wamr-sdk/app/libc-builtin-sysroot  \
         -Wl,--allow-undefined-file=${WAMR_DIR}/wamr-sdk/app/libc-builtin-sysroot/share/defined-symbols.txt \
         -Wl,--strip-all,--no-entry -nostdlib \
-        -Wl,--export=generate_float \
         -Wl,--export=main \
         -Wl,--allow-undefined \
         -o ${OUT_DIR}/wasm-apps/${OUT_FILE} ${APP_SRC}

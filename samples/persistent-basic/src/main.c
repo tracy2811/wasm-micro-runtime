@@ -152,7 +152,7 @@ run_phantom(void *ptr)
     else {
         printf("Take snapshot #0...\n");
         take_snapshot(file_name0);
-        sleep(1);
+        sleep(2);
         printf("Take snapshot #1 then stop...\n");
         take_snapshot_and_stop(file_name1);
     }

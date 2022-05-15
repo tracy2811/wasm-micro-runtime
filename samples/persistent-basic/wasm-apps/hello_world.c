@@ -6,20 +6,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-float
-generate_float(int iteration, double seed1, float seed2)
-{
-    float ret;
-
-    printf("calling into WASM function: %s\n", __FUNCTION__);
-
-    for (int i = 0; i < iteration; i++) {
-        ret += 1.0f / seed1 + seed2;
-    }
-
-    return ret;
-}
-
 int
 print_result(int n, double e)
 {
