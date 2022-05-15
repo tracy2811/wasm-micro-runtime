@@ -39,10 +39,7 @@ main()
     for (; n > 0; n++) {
         fac *= n;
         e += 1.0 / fac;
-        // print_result(n, e);
-        if (n % 100000 == 0) {
-            printf("N=%d: e=%lf\n", n, e);
-        }
+        print_result(n, e);
     }
 
     return 0;
