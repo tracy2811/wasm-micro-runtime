@@ -1135,39 +1135,37 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
     }                                                                          \
     fclose(ptr);
 
-#define HANDLE_SIGNAL()                             \
-    pthread_mutex_lock(&mutex1);                    \
-    switch (current_action) {                       \
-        case STOP:                                  \
-            current_action = NONE;                  \
-            pthread_mutex_unlock(&mutex2);          \
-            pthread_mutex_unlock(&mutex1);          \
-            return;                                 \
-        case SNAP:                                  \
-            current_action = NONE;                  \
-            SAVE_SNAP();                            \
-            pthread_mutex_unlock(&mutex2);          \
-            pthread_mutex_unlock(&mutex1);          \
-            pthread_mutex_lock(&mutex2);            \
-            break;                                  \
-        case SNAP_STOP:                             \
-            current_action = NONE;                  \
-            SAVE_SNAP();                            \
-            pthread_mutex_unlock(&mutex2);          \
-            pthread_mutex_unlock(&mutex1);          \
-            return;                                 \
-        case SNAP_START:                            \
-            current_action = NONE;                  \
-            READ_SNAP();                            \
-            pthread_mutex_unlock(&mutex2);          \
-            pthread_mutex_unlock(&mutex1);          \
-            pthread_mutex_lock(&mutex2);            \
-            break;                                  \
-        default:                                    \
-            pthread_mutex_unlock(&mutex2);          \
-            pthread_mutex_unlock(&mutex1);          \
-            pthread_mutex_lock(&mutex2);            \
-            break;                                  \
+#define HANDLE_SIGNAL()                    \
+    pthread_mutex_unlock(&mutex1);         \
+    pthread_mutex_lock(&mutex1);           \
+    switch (current_action) {              \
+        case STOP:                         \
+            current_action = NONE;         \
+            pthread_mutex_unlock(&mutex2); \
+            pthread_mutex_unlock(&mutex1); \
+            return;                        \
+        case SNAP:                         \
+            current_action = NONE;         \
+            SAVE_SNAP();                   \
+            pthread_mutex_unlock(&mutex2); \
+            pthread_mutex_lock(&mutex2);   \
+            break;                         \
+        case SNAP_STOP:                    \
+            current_action = NONE;         \
+            SAVE_SNAP();                   \
+            pthread_mutex_unlock(&mutex2); \
+            pthread_mutex_unlock(&mutex1); \
+            return;                        \
+        case SNAP_START:                   \
+            current_action = NONE;         \
+            READ_SNAP();                   \
+            pthread_mutex_unlock(&mutex2); \
+            pthread_mutex_lock(&mutex2);   \
+            break;                         \
+        default:                           \
+            pthread_mutex_unlock(&mutex2); \
+            pthread_mutex_lock(&mutex2);   \
+            break;                         \
     }
 
 void
