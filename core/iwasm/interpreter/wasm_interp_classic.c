@@ -1144,7 +1144,7 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
     pthread_mutex_lock(&action_mutex);           \
     switch (current_action) {                    \
         case STOP:                               \
-            current_action = NONE;               \
+            current_action = INIT;               \
             pthread_cond_signal(&action_cond);   \
             pthread_mutex_unlock(&action_mutex); \
             return;                              \
@@ -1155,7 +1155,7 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
             pthread_mutex_unlock(&action_mutex); \
             break;                               \
         case SNAP_STOP:                          \
-            current_action = NONE;               \
+            current_action = INIT;               \
             SAVE_SNAP();                         \
             pthread_cond_signal(&action_cond);   \
             pthread_mutex_unlock(&action_mutex); \
@@ -1177,12 +1177,14 @@ void
 take_snapshot(char *file)
 {
     pthread_mutex_lock(&action_mutex);
-    while (current_action != NONE) {
-        pthread_cond_wait(&action_cond, &action_mutex);
+    if (current_action == INIT) {
+        pthread_mutex_unlock(&action_mutex);
+        return;
     }
     current_action = SNAP;
     filename = file;
     pthread_mutex_unlock(&action_mutex);
+
     pthread_mutex_lock(&action_mutex);
     while (current_action == SNAP) {
         pthread_cond_wait(&action_cond, &action_mutex);
@@ -1195,12 +1197,14 @@ void
 take_snapshot_and_stop(char *file)
 {
     pthread_mutex_lock(&action_mutex);
-    while (current_action != NONE) {
-        pthread_cond_wait(&action_cond, &action_mutex);
+    if (current_action == INIT) {
+        pthread_mutex_unlock(&action_mutex);
+        return;
     }
     current_action = SNAP_STOP;
     filename = file;
     pthread_mutex_unlock(&action_mutex);
+
     pthread_mutex_lock(&action_mutex);
     while (current_action == SNAP_STOP) {
         pthread_cond_wait(&action_cond, &action_mutex);
@@ -1213,11 +1217,13 @@ void
 stop()
 {
     pthread_mutex_lock(&action_mutex);
-    while (current_action != NONE) {
-        pthread_cond_wait(&action_cond, &action_mutex);
+    if (current_action == INIT) {
+        pthread_mutex_unlock(&action_mutex);
+        return;
     }
     current_action = STOP;
     pthread_mutex_unlock(&action_mutex);
+
     pthread_mutex_lock(&action_mutex);
     while (current_action == STOP) {
         pthread_cond_wait(&action_cond, &action_mutex);
