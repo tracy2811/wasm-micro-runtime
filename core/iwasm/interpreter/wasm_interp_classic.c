@@ -19,11 +19,11 @@
 #include "../libraries/thread-mgr/thread_manager.h"
 #endif
 
-enum action { NONE, SNAP, STOP, SNAP_STOP, SNAP_START };
-int current_action = NONE;
+enum action { INIT, NONE, SNAP, STOP, SNAP_STOP, SNAP_START };
+int current_action = INIT;
 
-pthread_mutex_t mutex1 = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t mutex2 = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t action_mutex;
+pthread_cond_t action_cond;
 
 char *filename;
 FILE *ptr;
@@ -978,7 +978,6 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
         fprintf(stdout, "%s %d\n", filename, errno);                          \
         break;                                                                \
     }                                                                         \
-    fread(&depth, sizeof(uint32), 1, ptr);                                    \
     /* Read memory */                                                         \
     fread(&(memory->num_bytes_per_page), sizeof(uint32), 1, ptr);             \
     fread(&(memory->cur_page_count), sizeof(uint32), 1, ptr);                 \
@@ -993,8 +992,9 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
     exec_env->wasm_stack.s.top =                                              \
         (uint8 *)(length + exec_env->wasm_stack.s.bottom);                    \
     {                                                                         \
-        fread(&length, sizeof(length), 1, ptr);                               \
-        for (size_t i = 0; i < length; i++) {                                 \
+        size_t nframe;                                                        \
+        fread(&nframe, sizeof(nframe), 1, ptr);                               \
+        for (size_t i = 0; i < nframe; i++) {                                 \
             fread(&length, sizeof(length), 1, ptr);                           \
             WASMInterpFrame *cur_frame =                                      \
                 (WASMInterpFrame *)(exec_env->wasm_stack.s.bottom + length);  \
@@ -1057,7 +1057,6 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
 
 #define SAVE_SNAP()                                                            \
     ptr = fopen(filename, "wb");                                               \
-    fwrite(&depth, sizeof(uint32), 1, ptr);                                    \
     /* Write memory */                                                         \
     fwrite(&(memory->num_bytes_per_page), sizeof(uint32), 1, ptr);             \
     fwrite(&(memory->cur_page_count), sizeof(uint32), 1, ptr);                 \
@@ -1135,81 +1134,122 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
     }                                                                          \
     fclose(ptr);
 
-#define HANDLE_SIGNAL()                    \
-    pthread_mutex_unlock(&mutex1);         \
-    pthread_mutex_lock(&mutex1);           \
-    switch (current_action) {              \
-        case STOP:                         \
-            current_action = NONE;         \
-            pthread_mutex_unlock(&mutex2); \
-            pthread_mutex_unlock(&mutex1); \
-            return;                        \
-        case SNAP:                         \
-            current_action = NONE;         \
-            SAVE_SNAP();                   \
-            pthread_mutex_unlock(&mutex2); \
-            pthread_mutex_lock(&mutex2);   \
-            break;                         \
-        case SNAP_STOP:                    \
-            current_action = NONE;         \
-            SAVE_SNAP();                   \
-            pthread_mutex_unlock(&mutex2); \
-            pthread_mutex_unlock(&mutex1); \
-            return;                        \
-        case SNAP_START:                   \
-            current_action = NONE;         \
-            READ_SNAP();                   \
-            pthread_mutex_unlock(&mutex2); \
-            pthread_mutex_lock(&mutex2);   \
-            break;                         \
-        default:                           \
-            pthread_mutex_unlock(&mutex2); \
-            pthread_mutex_lock(&mutex2);   \
-            break;                         \
+#define HANDLE_RETURN()                \
+    pthread_mutex_lock(&action_mutex); \
+    current_action = INIT;             \
+    pthread_cond_signal(&action_cond); \
+    pthread_mutex_unlock(&action_mutex);
+
+#define HANDLE_SIGNAL()                          \
+    pthread_mutex_lock(&action_mutex);           \
+    switch (current_action) {                    \
+        case STOP:                               \
+            current_action = NONE;               \
+            pthread_cond_signal(&action_cond);   \
+            pthread_mutex_unlock(&action_mutex); \
+            return;                              \
+        case SNAP:                               \
+            current_action = NONE;               \
+            SAVE_SNAP();                         \
+            pthread_cond_signal(&action_cond);   \
+            pthread_mutex_unlock(&action_mutex); \
+            break;                               \
+        case SNAP_STOP:                          \
+            current_action = NONE;               \
+            SAVE_SNAP();                         \
+            pthread_cond_signal(&action_cond);   \
+            pthread_mutex_unlock(&action_mutex); \
+            return;                              \
+        case SNAP_START:                         \
+            current_action = NONE;               \
+            READ_SNAP();                         \
+            pthread_cond_signal(&action_cond);   \
+            pthread_mutex_unlock(&action_mutex); \
+            break;                               \
+        default:                                 \
+            current_action = NONE;               \
+            pthread_cond_signal(&action_cond);   \
+            pthread_mutex_unlock(&action_mutex); \
+            break;                               \
     }
 
 void
 take_snapshot(char *file)
 {
-    pthread_mutex_lock(&mutex1);
+    pthread_mutex_lock(&action_mutex);
+    while (current_action != NONE) {
+        pthread_cond_wait(&action_cond, &action_mutex);
+    }
     current_action = SNAP;
     filename = file;
-    pthread_mutex_unlock(&mutex1);
-    pthread_mutex_lock(&mutex2);
-    pthread_mutex_unlock(&mutex2);
+    pthread_mutex_unlock(&action_mutex);
+    pthread_mutex_lock(&action_mutex);
+    while (current_action == SNAP) {
+        pthread_cond_wait(&action_cond, &action_mutex);
+    }
+    pthread_mutex_unlock(&action_mutex);
     return;
 }
 
 void
 take_snapshot_and_stop(char *file)
 {
-    pthread_mutex_lock(&mutex1);
+    pthread_mutex_lock(&action_mutex);
+    while (current_action != NONE) {
+        pthread_cond_wait(&action_cond, &action_mutex);
+    }
     current_action = SNAP_STOP;
     filename = file;
-    pthread_mutex_unlock(&mutex1);
-    pthread_mutex_lock(&mutex2);
-    pthread_mutex_unlock(&mutex2);
+    pthread_mutex_unlock(&action_mutex);
+    pthread_mutex_lock(&action_mutex);
+    while (current_action == SNAP_STOP) {
+        pthread_cond_wait(&action_cond, &action_mutex);
+    }
+    pthread_mutex_unlock(&action_mutex);
     return;
 }
 
 void
 stop()
 {
-    pthread_mutex_lock(&mutex1);
+    pthread_mutex_lock(&action_mutex);
+    while (current_action != NONE) {
+        pthread_cond_wait(&action_cond, &action_mutex);
+    }
     current_action = STOP;
-    pthread_mutex_unlock(&mutex1);
-    pthread_mutex_lock(&mutex2);
-    pthread_mutex_unlock(&mutex2);
+    pthread_mutex_unlock(&action_mutex);
+    pthread_mutex_lock(&action_mutex);
+    while (current_action == STOP) {
+        pthread_cond_wait(&action_cond, &action_mutex);
+    }
+    pthread_mutex_unlock(&action_mutex);
     return;
 }
 
 void
 start_from_snapshot(char *file)
 {
-    pthread_mutex_lock(&mutex1);
-    filename = file;
-    current_action = SNAP_START;
-    pthread_mutex_unlock(&mutex1);
+    pthread_mutex_lock(&action_mutex);
+    if (current_action == INIT) {
+        filename = file;
+        current_action = SNAP_START;
+    }
+    pthread_mutex_unlock(&action_mutex);
+}
+
+void
+init_action_primitives()
+{
+    current_action = INIT;
+    pthread_mutex_init(&action_mutex, NULL);
+    pthread_cond_init(&action_cond, NULL);
+}
+
+void
+destroy_action_primitives()
+{
+    pthread_mutex_destroy(&action_mutex);
+    pthread_cond_destroy(&action_cond);
 }
 
 static void
@@ -4085,13 +4125,13 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
         FREE_FRAME(exec_env, frame);
         wasm_exec_env_set_cur_frame(exec_env, (WASMRuntimeFrame *)prev_frame);
 
-        if (!prev_frame->ip)
+        if (!prev_frame->ip) {
+            HANDLE_RETURN();
             /* Called from native. */
             return;
+        }
 
         RECOVER_CONTEXT(prev_frame);
-        pthread_mutex_unlock(&mutex2);
-        pthread_mutex_unlock(&mutex1);
         HANDLE_OP_END();
     }
 
@@ -4106,8 +4146,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
 
     got_exception:
         SYNC_ALL_TO_FRAME();
-        pthread_mutex_unlock(&mutex2);
-        pthread_mutex_unlock(&mutex1);
+        HANDLE_RETURN();
         return;
 
 #if WASM_ENABLE_LABELS_AS_VALUES == 0

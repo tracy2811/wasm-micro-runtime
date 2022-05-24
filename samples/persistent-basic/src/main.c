@@ -108,11 +108,6 @@ run_wasm(void *ptr)
     // // 07. Function call with parameters in an array of 32 bits elements and
     // size
     uint32 argv[4];
-    double arg_d = 0.000101;
-    argv[0] = 10;
-    // the second arg will occupy two array elements
-    memcpy(&argv[1], &arg_d, sizeof(arg_d));
-    *(float *)(argv + 3) = 300.002;
     // pass 2 elements for function arguments
     if (!wasm_runtime_call_wasm(exec_env, func, 2, argv)) {
         printf("call wasm function main failed. %s\n",
@@ -188,12 +183,12 @@ main(int argc, char *argv_main[])
         printf("SNAP path: %s\n", args.snap_path);
     }
 
+    init_action_primitives();
     wamrret = pthread_create(&wamr, NULL, run_wasm, (void *)&args);
     phantomret =
         pthread_create(&phantom, NULL, run_phantom, (void *)argv_main[2]);
-
     pthread_join(wamr, NULL);
     pthread_join(phantom, NULL);
-
+    destroy_action_primitives();
     return 0;
 }

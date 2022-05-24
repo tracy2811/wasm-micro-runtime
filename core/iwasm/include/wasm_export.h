@@ -961,6 +961,16 @@ void take_snapshot_and_stop(char *file);
  */
 void start_from_snapshot(char *file);
 
+/**
+ * Initialize mutex and condition
+ */
+void init_action_primitives();
+
+/**
+ * Destroy mutex and condition
+ */
+void destroy_action_primitives();
+
 /* clang-format on */
 
 #ifdef __cplusplus
