@@ -1150,19 +1150,22 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
             return;                              \
         case SNAP:                               \
             current_action = NONE;               \
-            SAVE_SNAP();                         \
+            /* Do not save snapshot when test */ \
+            /* SAVE_SNAP();  */                  \
             pthread_cond_signal(&action_cond);   \
             pthread_mutex_unlock(&action_mutex); \
             break;                               \
         case SNAP_STOP:                          \
             current_action = INIT;               \
-            SAVE_SNAP();                         \
+            /* Do not save snapshot when test */ \
+            /* SAVE_SNAP();  */                  \
             pthread_cond_signal(&action_cond);   \
             pthread_mutex_unlock(&action_mutex); \
             return;                              \
         case SNAP_START:                         \
             current_action = NONE;               \
-            READ_SNAP();                         \
+            /* Do not read snapshot when test */ \
+            /* READ_SNAP(); */                   \
             pthread_cond_signal(&action_cond);   \
             pthread_mutex_unlock(&action_mutex); \
             break;                               \
