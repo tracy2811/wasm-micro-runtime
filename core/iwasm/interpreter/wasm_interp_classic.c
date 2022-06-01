@@ -1306,6 +1306,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
     uint8 value_type;
     size_t length;
     uint8 *start_frame_addr = exec_env->wasm_stack.s.top;
+    uint16 
 
     HANLE_SNAP_START();
 
