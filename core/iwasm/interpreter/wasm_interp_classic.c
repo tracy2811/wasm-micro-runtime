@@ -1148,7 +1148,7 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
     pthread_cond_signal(&action_cond); \
     pthread_mutex_unlock(&action_mutex);
 
-#define HANLE_SNAP_START()              \
+#define HANDLE_SNAP_START()             \
     pthread_mutex_lock(&action_mutex);  \
     if (current_action == SNAP_START) { \
         current_action = NONE;          \
@@ -1157,34 +1157,37 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
     pthread_cond_signal(&action_cond);  \
     pthread_mutex_unlock(&action_mutex);
 
-#define HANDLE_SIGNAL()                          \
-    pthread_mutex_lock(&action_mutex);           \
-    switch (current_action) {                    \
-        case NONE:                               \
-            pthread_mutex_unlock(&action_mutex); \
-            break;                               \
-        case SNAP:                               \
-            current_action = NONE;               \
-            SAVE_SNAP();                         \
-            pthread_cond_signal(&action_cond);   \
-            pthread_mutex_unlock(&action_mutex); \
-            break;                               \
-        case STOP:                               \
-            current_action = INIT;               \
-            pthread_cond_signal(&action_cond);   \
-            pthread_mutex_unlock(&action_mutex); \
-            return;                              \
-        case SNAP_STOP:                          \
-            current_action = INIT;               \
-            SAVE_SNAP();                         \
-            pthread_cond_signal(&action_cond);   \
-            pthread_mutex_unlock(&action_mutex); \
-            return;                              \
-        default:                                 \
-            current_action = NONE;               \
-            pthread_cond_signal(&action_cond);   \
-            pthread_mutex_unlock(&action_mutex); \
-            break;                               \
+#define HANDLE_SIGNAL()                              \
+    if (++counter >= 1000) {                         \
+        counter = 0;                                 \
+        pthread_mutex_lock(&action_mutex);           \
+        switch (current_action) {                    \
+            case NONE:                               \
+                pthread_mutex_unlock(&action_mutex); \
+                break;                               \
+            case SNAP:                               \
+                current_action = NONE;               \
+                SAVE_SNAP();                         \
+                pthread_cond_signal(&action_cond);   \
+                pthread_mutex_unlock(&action_mutex); \
+                break;                               \
+            case STOP:                               \
+                current_action = INIT;               \
+                pthread_cond_signal(&action_cond);   \
+                pthread_mutex_unlock(&action_mutex); \
+                return;                              \
+            case SNAP_STOP:                          \
+                current_action = INIT;               \
+                SAVE_SNAP();                         \
+                pthread_cond_signal(&action_cond);   \
+                pthread_mutex_unlock(&action_mutex); \
+                return;                              \
+            default:                                 \
+                current_action = NONE;               \
+                pthread_cond_signal(&action_cond);   \
+                pthread_mutex_unlock(&action_mutex); \
+                break;                               \
+        }                                            \
     }
 
 void
@@ -1306,9 +1309,9 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
     uint8 value_type;
     size_t length;
     uint8 *start_frame_addr = exec_env->wasm_stack.s.top;
-    uint16 
+    uint16 counter = 0;
 
-    HANLE_SNAP_START();
+    HANDLE_SNAP_START();
 
 #if WASM_ENABLE_LABELS_AS_VALUES != 0
 #define HANDLE_OPCODE(op) &&HANDLE_##op

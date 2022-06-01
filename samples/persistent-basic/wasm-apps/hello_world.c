@@ -9,7 +9,7 @@
 int
 print_result(int n, double e)
 {
-    if (n % 100000 == 0) {
+    if (n % 500000 == 0) {
         printf("N=%d: e=%lf\n", n, e);
     }
     return 0;
