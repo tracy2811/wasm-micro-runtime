@@ -1150,36 +1150,39 @@ get_global_addr(uint8 *global_data, WASMGlobalInstance *global)
     pthread_cond_signal(&action_cond);       \
     pthread_mutex_unlock(&action_mutex);
 
-#define HANDLE_SIGNAL()                          \
-    pthread_mutex_lock(&action_mutex);           \
-    switch (current_action) {                    \
-        case NONE:                               \
-            pthread_mutex_unlock(&action_mutex); \
-            break;                               \
-        case SNAP:                               \
-            current_action = NONE;               \
-            /* Do not save snapshot when test */ \
-            /* SAVE_SNAP();  */                  \
-            pthread_cond_signal(&action_cond);   \
-            pthread_mutex_unlock(&action_mutex); \
-            break;                               \
-        case STOP:                               \
-            current_action = INIT;               \
-            pthread_cond_signal(&action_cond);   \
-            pthread_mutex_unlock(&action_mutex); \
-            return;                              \
-        case SNAP_STOP:                          \
-            current_action = INIT;               \
-            /* Do not save snapshot when test */ \
-            /* SAVE_SNAP();  */                  \
-            pthread_cond_signal(&action_cond);   \
-            pthread_mutex_unlock(&action_mutex); \
-            return;                              \
-        default:                                 \
-            current_action = NONE;               \
-            pthread_cond_signal(&action_cond);   \
-            pthread_mutex_unlock(&action_mutex); \
-            break;                               \
+#define HANDLE_SIGNAL()                              \
+    if (++counter >= 1000) {                         \
+        counter = 0;                                 \
+        pthread_mutex_lock(&action_mutex);           \
+        switch (current_action) {                    \
+            case NONE:                               \
+                pthread_mutex_unlock(&action_mutex); \
+                break;                               \
+            case SNAP:                               \
+                current_action = NONE;               \
+                /* Do not save snapshot when test */ \
+                /* SAVE_SNAP();  */                  \
+                pthread_cond_signal(&action_cond);   \
+                pthread_mutex_unlock(&action_mutex); \
+                break;                               \
+            case STOP:                               \
+                current_action = INIT;               \
+                pthread_cond_signal(&action_cond);   \
+                pthread_mutex_unlock(&action_mutex); \
+                return;                              \
+            case SNAP_STOP:                          \
+                current_action = INIT;               \
+                /* Do not save snapshot when test */ \
+                /* SAVE_SNAP();  */                  \
+                pthread_cond_signal(&action_cond);   \
+                pthread_mutex_unlock(&action_mutex); \
+                return;                              \
+            default:                                 \
+                current_action = NONE;               \
+                pthread_cond_signal(&action_cond);   \
+                pthread_mutex_unlock(&action_mutex); \
+                break;                               \
+        }                                            \
     }
 
 void
@@ -1301,6 +1304,7 @@ wasm_interp_call_func_bytecode(WASMModuleInstance *module,
     uint8 value_type;
     size_t length;
     uint8 *start_frame_addr = exec_env->wasm_stack.s.top;
+    uint16 counter = 0;
 
     HANLE_SNAP_START();
 
